@@ -22,7 +22,7 @@ const cookie=(value,maxAge)=>"sb_session="+value+"; Path=/; HttpOnly; Secure; Sa
 const validUser=s=>typeof s==="string"&&/^[a-zA-Z0-9_.]{3,32}$/.test(s);
 const validEmail=s=>typeof s==="string"&&s.length<=254&&/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 const validPhone=s=>typeof s==="string"&&/^\+?[0-9]{9,16}$/.test(s.replace(/[ -]/g,""));
-async function parse(req){if(Number(req.headers.get("content-length")||0)>5000)throw Error("Too large");const text=await req.text();if(text.length>5000)throw Error("Too large");return JSON.parse(text)}
+async function parse(req){const limit=new URL(req.url).pathname==="/api/owner/payment-settings"?190000:5000;if(Number(req.headers.get("content-length")||0)>limit)throw Error("Too large");const text=await req.text();if(text.length>limit)throw Error("Too large");return JSON.parse(text)}
 const sameOrigin=req=>{const origin=req.headers.get("origin");return !origin||origin===new URL(req.url).origin};
 export default {async fetch(req,env){const url=new URL(req.url),path=url.pathname;
 if(!path.startsWith("/api/"))return json({error:"API route only"},404);
