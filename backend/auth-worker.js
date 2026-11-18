@@ -38,6 +38,43 @@ if(path==="/api/logout"&&req.method==="POST")return json({ok:true},200,{"set-coo
 if(path==="/api/checkout"&&req.method==="POST"){const s=await session(req,env.AUTH_SECRET);if(!s)return json({error:"Login diperlukan",login:"/login?next=%2Fcheckout"},401);const rows=await sql(env,"SELECT id,role,status FROM sb_users WHERE id=$1",[s.sub]);if(!rows.length||rows[0].status!=="ACTIVE"||rows[0].role!=="CUSTOMER")return json({error:"Akses pelanggan diperlukan"},403);return json({error:"Pembayaran belum diaktifkan; pesanan tidak dibuat"},503)}
 if(path==="/api/admin/owners"&&req.method==="GET"){const s=await session(req,env.AUTH_SECRET);if(!s||s.role!=="SUPER_ADMIN")return json({error:"Forbidden"},403);const rows=await sql(env,"SELECT id,name,username,email,phone,store_name,created_at FROM sb_users WHERE role='OWNER' AND status='PENDING' ORDER BY created_at DESC LIMIT 100");return json({owners:rows})}
 if(path==="/api/admin/owners/decision"&&req.method==="POST"){const s=await session(req,env.AUTH_SECRET);if(!s||s.role!=="SUPER_ADMIN")return json({error:"Forbidden"},403);const d=await parse(req);if(!/^[0-9a-f-]{36}$/i.test(d.id||"")||!["APPROVE","REJECT"].includes(d.action))return json({error:"Invalid request"},400);const rows=await sql(env,"UPDATE sb_users SET status=$1 WHERE id=$2 AND role='OWNER' AND status='PENDING' RETURNING id",[d.action==="APPROVE"?"ACTIVE":"REJECTED",d.id]);return json({ok:rows.length===1})}
+
+// Multi-tenant catalog endpoints. Store identity comes from authenticated session only.
+if(path==="/api/owner/store"&&["GET","PUT"].includes(req.method)){
+ const sess=await session(req,env.AUTH_SECRET);
+ if(!sess)return json({error:"Login diperlukan"},401);
+ const users=await sql(env,"SELECT id,role,status,store_name FROM sb_users WHERE id=$1 LIMIT 1",[sess.sub]);
+ const user=users[0];if(!user||user.role!=="OWNER"||user.status!=="ACTIVE")return json({error:"Akses Owner diperlukan"},403);
+ if(req.method==="GET"){const rows=await sql(env,"SELECT id,slug,name,logo_url,theme,navigation,content,chat_settings FROM sb_stores WHERE owner_id=$1 LIMIT 1",[user.id]);return json({store:rows[0]||null})}
+ const d=await parse(req);if(!d||typeof d.name!=="string"||!d.name.trim()||d.name.length>120)return json({error:"Nama toko tidak valid"},400);
+ const logo=typeof d.logoUrl==="string"&&d.logoUrl.length<2048&&/^https:\/\//.test(d.logoUrl)?d.logoUrl:null;
+ const obj=x=>x&&typeof x==="object"&&!Array.isArray(x)?x:{};
+ const rows=await sql(env,"UPDATE sb_stores SET name=$1,logo_url=$2,theme=$3::jsonb,navigation=$4::jsonb,content=$5::jsonb,chat_settings=$6::jsonb,updated_at=now() WHERE owner_id=$7 RETURNING id,name,slug",[d.name.trim(),logo,JSON.stringify(obj(d.theme)),JSON.stringify(obj(d.navigation)),JSON.stringify(obj(d.content)),JSON.stringify(obj(d.chatSettings)),user.id]);
+ if(!rows.length)return json({error:"Toko belum dibuat. Hubungi administrator."},409);
+ return json({ok:true,store:rows[0]});
+}
+if(path==="/api/owner/products"&&["GET","POST"].includes(req.method)||/^\/api\/owner\/products\/[0-9a-f-]{36}$/i.test(path)&&["PUT","DELETE"].includes(req.method)){
+ const sess=await session(req,env.AUTH_SECRET);if(!sess)return json({error:"Login diperlukan"},401);
+ const users=await sql(env,"SELECT id,role,status FROM sb_users WHERE id=$1 LIMIT 1",[sess.sub]);
+ if(!users[0]||users[0].role!=="OWNER"||users[0].status!=="ACTIVE")return json({error:"Akses Owner diperlukan"},403);
+ const stores=await sql(env,"SELECT id FROM sb_stores WHERE owner_id=$1 LIMIT 1",[sess.sub]);
+ if(!stores.length)return json({error:"Toko belum dibuat"},409);
+ const storeId=stores[0].id;
+ if(req.method==="GET"){const rows=await sql(env,"SELECT id,name,description,category,price,stock,images,discount_type,discount_value,discount_ends_at,status,created_at FROM sb_products WHERE store_id=$1 ORDER BY created_at DESC LIMIT 500",[storeId]);return json({products:rows})}
+ if(req.method==="DELETE"){const id=path.split("/").pop();const rows=await sql(env,"DELETE FROM sb_products WHERE id=$1 AND store_id=$2 RETURNING id",[id,storeId]);return json({ok:rows.length===1})}
+ const d=await parse(req);
+ if(typeof d.name!=="string"||!d.name.trim()||d.name.length>180||!Number.isFinite(Number(d.price))||Number(d.price)<0||!Number.isInteger(Number(d.stock))||Number(d.stock)<0)return json({error:"Data produk tidak valid"},400);
+ const images=Array.isArray(d.images)?d.images.filter(x=>typeof x==="string"&&x.length<2048&&/^https:\/\//.test(x)).slice(0,20):[];
+ const kind=["NONE","PERCENT","AMOUNT"].includes(d.discountType)?d.discountType:"NONE";
+ const discount=Number(d.discountValue||0);if(!Number.isFinite(discount)||discount<0||(kind==="PERCENT"&&discount>100))return json({error:"Diskon tidak valid"},400);
+ const status=["DRAFT","ACTIVE","ARCHIVED"].includes(d.status)?d.status:"DRAFT";
+ const values=[d.name.trim(),String(d.description||"").slice(0,5000),String(d.category||"").slice(0,120),Number(d.price),Number(d.stock),JSON.stringify(images),kind,discount,d.discountEndsAt||null,status];
+ let rows;
+ if(req.method==="POST")rows=await sql(env,"INSERT INTO sb_products(store_id,name,description,category,price,stock,images,discount_type,discount_value,discount_ends_at,status) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11) RETURNING id",[storeId,...values]);
+ else rows=await sql(env,"UPDATE sb_products SET name=$1,description=$2,category=$3,price=$4,stock=$5,images=$6::jsonb,discount_type=$7,discount_value=$8,discount_ends_at=$9,status=$10,updated_at=now() WHERE id=$11 AND store_id=$12 RETURNING id",[...values,path.split("/").pop(),storeId]);
+ return json({ok:rows.length===1,id:rows[0]?.id},rows.length?200:404);
+}
+
 return json({error:"Not found"},404)
 }catch(e){return json({error:"Permintaan tidak dapat diproses"},500)}
 }};
